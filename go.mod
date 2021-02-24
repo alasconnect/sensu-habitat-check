@@ -1,4 +1,4 @@
-module github.com/{{ .GithubUser }}/{{ .GithubProject }}
+module github.com/alasconnect/sensu-habitat-check
 
 go 1.14
 
