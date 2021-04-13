@@ -16,8 +16,8 @@ import (
 type Config struct {
 	sensu.PluginConfig
 	SupervisorURL string
-	// Services      []string
-	Timeout int
+	Services      []string
+	Timeout       int
 }
 
 var (
@@ -39,15 +39,15 @@ var (
 			Usage:     "Supervisor URL",
 			Value:     &plugin.SupervisorURL,
 		},
-		// {
-		// 	Path:      "service",
-		// 	Env:       "",
-		// 	Argument:  "service",
-		// 	Shorthand: "s",
-		// 	Default:   []string{},
-		// 	Usage:     "Explicit service to check, in format service_name.service_group",
-		// 	Value:     &plugin.Services,
-		// },
+		{
+			Path:      "service",
+			Env:       "",
+			Argument:  "service",
+			Shorthand: "s",
+			Default:   []string{},
+			Usage:     "Explicit service to check, in format service_name.service_group",
+			Value:     &plugin.Services,
+		},
 		{
 			Path:      "timeout",
 			Env:       "",
@@ -66,14 +66,19 @@ func main() {
 }
 
 func checkArgs(event *types.Event) (int, error) {
-	// if len(plugin.Services) > 0 {
-	// 	for _, service := range plugin.Services {
-	// 		serviceSplit := strings.SplitN(service, ".", 2)
-	// 		if len(serviceSplit) != 2 {
-	// 			return sensu.CheckStateWarning, fmt.Errorf("--service %q value malformed should be \"service_name.service_group\"", service)
-	// 		}
-	// 	}
-	// }
+	if len(plugin.Services) > 0 {
+		for _, service := range plugin.Services {
+			serviceSplit := strings.SplitN(service, ".", 2)
+			if len(serviceSplit) != 2 {
+				return sensu.CheckStateWarning, fmt.Errorf("--service %q value malformed should be \"service_name.service_group\"", service)
+			}
+		}
+	}
+
+	_, err := url.Parse(plugin.SupervisorURL)
+	if err != nil {
+		return sensu.CheckStateWarning, fmt.Errorf("failed to parse supervisor URL %s: %v", plugin.SupervisorURL, err)
+	}
 
 	return sensu.CheckStateOK, nil
 }
@@ -88,32 +93,17 @@ func executeCheck(event *types.Event) (int, error) {
 	client.Transport = http.DefaultTransport
 	client.Timeout = time.Duration(plugin.Timeout) * time.Second
 
-	_, err := url.Parse(plugin.SupervisorURL)
-	if err != nil {
-		return sensu.CheckStateWarning, fmt.Errorf("Failed to parse supervisor URL %s: %v", plugin.SupervisorURL, err)
-	}
-
-	req, err := http.NewRequest("GET", plugin.SupervisorURL+"/services", nil)
-	if err != nil {
-		return sensu.CheckStateCritical, err
-	}
-
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return sensu.CheckStateCritical, err
-	}
-
-	defer resp.Body.Close()
-	if err != nil {
-		return sensu.CheckStateCritical, err
-	}
-
 	var sResp ServiceResponse
+	var err error
 
-	if err := json.NewDecoder(resp.Body).Decode(&sResp); err != nil {
-		return sensu.CheckStateCritical, fmt.Errorf("Failed to decode service response: %v", err)
+	if len(plugin.Services) > 0 {
+		sResp, err = checkServices(plugin.Services, client)
+	} else {
+		sResp, err = checkAllServices(client)
+	}
+
+	if err != nil {
+		return sensu.CheckStateCritical, fmt.Errorf("could not retrive service health: %v", err)
 	}
 
 	oks := 0
@@ -152,4 +142,60 @@ func executeCheck(event *types.Event) (int, error) {
 	}
 
 	return sensu.CheckStateOK, nil
+}
+
+func checkAllServices(client *http.Client) (ServiceResponse, error) {
+	req, err := http.NewRequest("GET", plugin.SupervisorURL+"/services", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	return getServiceResponse(client, req)
+}
+
+func checkServices(services []string, client *http.Client) (ServiceResponse, error) {
+	var result ServiceResponse
+
+	for _, service := range services {
+		serviceSplit := strings.SplitN(service, ".", 2)
+
+		req, err := http.NewRequest("GET", plugin.SupervisorURL+"/services/"+serviceSplit[0]+"/"+serviceSplit[1], nil)
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("Accept", "application/json")
+		var sResp ServiceResponse
+
+		sResp, err = getServiceResponse(client, req)
+		if err != nil {
+			return nil, err
+		}
+
+		result = append(result, sResp...)
+	}
+
+	return result, nil
+}
+
+func getServiceResponse(client *http.Client, req *http.Request) (ServiceResponse, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var result ServiceResponse
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode service response: %v", err)
+	}
+
+	return result, nil
 }
