@@ -7,7 +7,8 @@ Versioning](http://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-## [0.0.1] - 2000-01-01
+## [0.1.0] - 2021-02-23
 
 ### Added
-- Initial release
+
+- Initial release. Checks the status of all services on the supervisor.
