@@ -88,8 +88,13 @@ type ServiceResponse []struct {
 }
 
 type HealthResponse struct {
-	ServiceGroup string `json:"service_group"`
-	Status       string `json:"status"`
+	Status string `json:"status"`
+}
+
+type Health struct {
+	ServiceGroup string
+	Status       int
+	Error        error
 }
 
 func executeCheck(event *types.Event) (int, error) {
@@ -107,11 +112,7 @@ func executeCheck(event *types.Event) (int, error) {
 		}
 	}
 
-	var sResp []HealthResponse
-	sResp, err = checkServices(services, client)
-	if err != nil {
-		return sensu.CheckStateCritical, fmt.Errorf("could not retrieve service health: %v", err)
-	}
+	health := checkServices(services, client)
 
 	oks := 0
 	warnings := 0
@@ -119,20 +120,24 @@ func executeCheck(event *types.Event) (int, error) {
 	unknowns := 0
 	found := false
 
-	for _, s := range sResp {
+	for _, h := range health {
 		found = true
-		if strings.EqualFold(s.Status, "ok") {
+		switch h.Status {
+		case sensu.CheckStateOK:
 			oks++
-			continue
-		} else if strings.EqualFold(s.Status, "warning") {
+		case sensu.CheckStateWarning:
 			warnings++
-			fmt.Printf("%s WARNING\n", s.ServiceGroup)
-		} else if strings.EqualFold(s.Status, "critical") {
+			fmt.Printf("%s WARNING\n", h.ServiceGroup)
+		case sensu.CheckStateCritical:
 			criticals++
-			fmt.Printf("%s CRITICAL\n", s.ServiceGroup)
-		} else if strings.EqualFold(s.Status, "unknown") {
+			fmt.Printf("%s CRITICAL\n", h.ServiceGroup)
+		case sensu.CheckStateUnknown:
 			unknowns++
-			fmt.Printf("%s UNKNOWN\n", s.ServiceGroup)
+			fmt.Printf("%s UNKNOWN\n", h.ServiceGroup)
+		}
+
+		if h.Error != nil {
+			fmt.Printf("Error occured while checking service:\n%v\n", h.Error)
 		}
 	}
 
@@ -152,18 +157,19 @@ func executeCheck(event *types.Event) (int, error) {
 }
 
 func getAllServices(client *http.Client) ([]string, error) {
-	req, err := http.NewRequest("GET", plugin.SupervisorURL+"/services", nil)
+	req, err := http.NewRequest("GET", getSupervisorUrl()+"/services", nil)
 	if err != nil {
 		return nil, err
 	}
 
 	req.Header.Set("Accept", "application/json")
 
-	var resp *http.Response
-	resp, err = getResponse(client, req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
+
+	defer resp.Body.Close()
 
 	var services ServiceResponse
 	if err := json.NewDecoder(resp.Body).Decode(&services); err != nil {
@@ -178,47 +184,62 @@ func getAllServices(client *http.Client) ([]string, error) {
 	return result, nil
 }
 
-func checkServices(services []string, client *http.Client) ([]HealthResponse, error) {
-	var result []HealthResponse
+func checkServices(services []string, client *http.Client) []Health {
+	var result []Health
 
 	for _, service := range services {
-		serviceSplit := strings.SplitN(service, ".", 2)
-
-		req, err := http.NewRequest("GET", plugin.SupervisorURL+"/services/"+serviceSplit[0]+"/"+serviceSplit[1]+"/health", nil)
-		if err != nil {
-			return nil, err
-		}
-
-		req.Header.Set("Accept", "application/json")
-
-		var resp *http.Response
-		resp, err = getResponse(client, req)
-		if err != nil {
-			return nil, err
-		}
-
-		var health HealthResponse
-		if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
-			return nil, fmt.Errorf("failed to decode health response: %v", err)
-		}
-		health.ServiceGroup = service
-
+		health := checkService(service, client)
 		result = append(result, health)
 	}
 
-	return result, nil
+	return result
 }
 
-func getResponse(client *http.Client, req *http.Request) (*http.Response, error) {
+func checkService(service string, client *http.Client) Health {
+	var result Health
+	result.ServiceGroup = service
+	result.Status = sensu.CheckStateUnknown
+
+	serviceSplit := strings.SplitN(service, ".", 2)
+
+	req, err := http.NewRequest("GET", getSupervisorUrl()+"/services/"+serviceSplit[0]+"/"+serviceSplit[1]+"/health", nil)
+	if err != nil {
+		result.Error = err
+		return result
+	}
+
+	req.Header.Set("Accept", "application/json")
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		result.Error = err
+		return result
 	}
 
 	defer resp.Body.Close()
-	if err != nil {
-		return nil, err
+
+	// a service that isn't loaded or has been stopped returns a 404
+	if resp.StatusCode == 200 {
+		var hResp HealthResponse
+		if err := json.NewDecoder(resp.Body).Decode(&hResp); err != nil {
+			result.Error = fmt.Errorf("failed to decode health response: %v", err)
+		} else {
+			if strings.EqualFold(hResp.Status, "ok") {
+				result.Status = sensu.CheckStateOK
+			} else if strings.EqualFold(hResp.Status, "warning") {
+				result.Status = sensu.CheckStateWarning
+			} else if strings.EqualFold(hResp.Status, "critical") {
+				result.Status = sensu.CheckStateCritical
+			} else if strings.EqualFold(hResp.Status, "unknown") {
+				result.Status = sensu.CheckStateUnknown
+			}
+		}
 	}
 
-	return resp, nil
+	return result
+}
+
+func getSupervisorUrl() string {
+	// a trailing slash will cause errors
+	return strings.TrimSuffix(plugin.SupervisorURL, "/")
 }
