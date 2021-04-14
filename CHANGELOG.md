@@ -7,6 +7,13 @@ Versioning](http://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+## [0.2.0] - 2021-04-14
+
+### Added
+
+- Added optional `services` parameter as a list of specific services to check.
+- Change check to use health endpoint of individual services.
+
 ## [0.1.0] - 2021-02-23
 
 ### Added
